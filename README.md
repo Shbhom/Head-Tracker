@@ -1,11 +1,12 @@
 # Galaxy Buds2 Pro head tracking
 
 Experimental Go/macOS backend for Galaxy Buds2 Pro **orientation**, not position
-or 6DoF tracking. Live quaternion acquisition has been verified in `session.jsonl`.
-WebSocket streaming supports local WS and TLS-protected WSS. Optional UDP export
-connects the same sensor stream to MacOpentrack and X-Plane 12.
+or 6DoF tracking. The backend exports the same sensor stream through two
+interfaces: **UDP** for MacOpentrack and X-Plane 12, and **WebSocket/API** for
+browser viewers and other clients. WebSocket streaming supports local WS and
+TLS-protected WSS.
 
-**Status:** end-to-end cockpit tracking has worked on this Mac, but physical
+**Status:** end-to-end cockpit tracking has been demonstrated, but physical
 axis/sign calibration is still experimental. Pitch reversal after recentering
 has been reported and is not yet resolved. The mapping examples below are
 starting points, not a verified convention for every session/device.
@@ -19,7 +20,7 @@ Galaxy Buds2 Pro
 buds-spatial (cmd/spatial)
   ├─ stdout: decoded JSON events
   ├─ WebSocket/API: raw quaternions → browser 3D viewer
-  └─ optional UDP exporter: rotation angles → MacOpentrack
+  └─ UDP exporter: rotation angles → MacOpentrack
                                                │ opentrackclient 1.0
                                                ▼
                                       X-Plane plugin → cockpit POV
@@ -30,7 +31,7 @@ buds-spatial (cmd/spatial)
 | `pkg/bluetooth/osx` | Discover Buds, resolve their SPP service, and manage RFCOMM through native macOS IOBluetooth. |
 | `pkg/protocol` | Parse frames and decode signed-int16 quaternion components, scaled by 10000 in `x,y,z,w` order. |
 | `pkg/spatial` | Enable/attach the sensor, send keep-alives every two seconds, deliver events, and clean up on exit. |
-| `cmd/spatial` | Run the session and distribute events to JSON, API, and optional UDP outputs. |
+| `cmd/spatial` | Run the session and distribute events to UDP, WebSocket/API, and stdout JSON outputs. |
 | `pkg/api` | Broadcast raw orientation over WS/WSS and expose HTTP status/latest-orientation endpoints. |
 | `pkg/opentrack` | Normalize quaternions, optionally subtract a neutral orientation, convert to Euler angles, map/invert axes, and send UDP. |
 | `visualizer/` | Render the raw WebSocket stream; its display centering/smoothing is local to the browser. |
@@ -47,46 +48,71 @@ Bluetooth connection. MacOpentrack reads UDP, **not** the WebSocket endpoint.
 - Go matching `go.mod` (currently 1.27.3), with cgo enabled.
 - Galaxy Buds2 Pro paired and connected in macOS Bluetooth settings.
 - For the browser viewer: Node 20.19+ (or current Node LTS) and npm.
-- For flight simulation: MacOpentrack and its matching X-Plane plugin. Local
-  installation/build details are in [docs/OPENTRACK.md](docs/OPENTRACK.md).
+- For flight simulation: MacOpentrack and its matching X-Plane plugin.
+  Installation/build notes are in [docs/OPENTRACK.md](docs/OPENTRACK.md).
 
-## Run
+## Build and run
 
-Wear both earbuds, connect them in macOS Bluetooth settings, then start head
-tracking. Discovery and connection happen automatically; there is no separate
-Bluetooth-test command:
+Wear both earbuds, connect them in macOS Bluetooth settings, and fully quit
+Galaxy Buds Manager, GalaxyBudsClient, or other competing Buds-management apps.
+Closing an app's window may leave it running in the menu bar.
+
+Build the backend:
 
 ```sh
-CGO_ENABLED=1 go run ./cmd/spatial
+CGO_ENABLED=1 go build -o buds-spatial ./cmd/spatial
 ```
 
-The command discovers connected Buds, resolves their proprietary SPP service to
+The main workflows use the **same executable**, not separate servers:
+
+### UDP export with neutral calibration
+
+```sh
+./buds-spatial -opentrack 127.0.0.1:4242 -opentrack-center
+```
+
+Face forward and press **Enter** in the backend terminal to recenter once data
+is streaming. See the MacOpentrack setup and axis-mapping instructions below.
+
+### WebSocket export for the browser viewer
+
+```sh
+./buds-spatial -origins http://127.0.0.1:3000,http://localhost:3000
+```
+
+Connect the viewer to `ws://127.0.0.1:8080/ws/orientation`.
+
+### UDP and WebSocket together
+
+```sh
+./buds-spatial -opentrack 127.0.0.1:4242 -opentrack-center \
+  -origins http://127.0.0.1:3000,http://localhost:3000
+```
+
+Run only one backend process. UDP is enabled by supplying its destination with
+`-opentrack`; the WebSocket/API server runs on `127.0.0.1:8080` by default.
+Use `-listen ""` for UDP-only operation. For WSS/LAN access, see
+[docs/API.md](docs/API.md).
+
+Discovery and connection happen automatically; there are no separate
+Bluetooth-test, raw-capture, or calibration subcommands. Calibration is controlled
+by `-opentrack-center` and terminal Enter, or locally in the browser viewer.
+
+The backend discovers connected Buds, resolves their proprietary SPP service to
 an RFCOMM channel, enables spatial mode, attaches the sensor, and sends a
 keep-alive every two seconds. It writes newline-delimited JSON quaternion events
 to stdout and diagnostics/control events to stderr. Ctrl-C sends detach/disable
 and closes RFCOMM. Raw signed values are scaled by 10000, ordered `x,y,z,w`;
 the JSON and WebSocket outputs are not normalized, recentered, smoothed, or
 mapped to application axes. Those transformations are separate in the UDP path.
-The command also serves `ws://127.0.0.1:8080/ws/orientation` by default. Use
-`-listen ""` to disable the API. For WSS/LAN access, see [docs/API.md](docs/API.md).
-
-Useful options:
-
-```sh
-CGO_ENABLED=1 go run ./cmd/spatial -duration 30s
-CGO_ENABLED=1 go run ./cmd/spatial -address AA:BB:CC:DD:EE:FF -idle-timeout 30s
-```
-
-The CLI has no raw-traffic capture option. To save the existing decoded JSON
-output instead, redirect stdout to a file of your choice (shell `>` overwrites
-an existing file). Logs remain on stderr.
 Without `-address`, discovery requires an already connected, recognizably named
 device. Explicit addresses bypass name discovery but must refer to Buds2 Pro.
 
-Build and test:
+### Developer checks
+
+These automated code checks do not open a Bluetooth connection or require earbuds:
 
 ```sh
-CGO_ENABLED=1 go build -o buds-spatial ./cmd/spatial
 CGO_ENABLED=1 go test -race ./...
 go vet ./...
 ```
@@ -104,13 +130,21 @@ new binary. Replacing the executable does not update an existing process.
 
 ### 2. Configure MacOpentrack
 
-Open `/Applications/MacOpentrack.app` on this Mac and create a Buds profile:
+Open the installed **MacOpentrack** application and create a Buds profile.
+For a standard installation:
+
+```sh
+open /Applications/MacOpentrack.app
+```
+
+Spotlight may also show `opentrack.app` bundles inside local build directories.
+Those are build artifacts, not necessarily the installed MacOpentrack application.
 
 | Setting | Value |
 | --- | --- |
 | Input | **UDP over network** |
 | Input port | **4242** |
-| Output | **opentrackclient 1.0** for the installed Matatata build/plugin |
+| Output | **opentrackclient 1.0** when using the matching Matatata build/plugin |
 | Filter | **Accela** |
 | Positional X/Y/Z | Disabled; the exporter always sends zero translation |
 
@@ -125,14 +159,15 @@ Click **Start** to receive data. Save/retain your profile settings for later use
 ### 3. Start UDP export
 
 Wear both Buds and fully quit competing Buds-management applications. For the
-current manually tested yaw/roll swap, with pitch inversion:
+previously tested yaw/roll swap, with pitch inversion (verify each direction
+before use; this is not a universal calibration):
 
 ```sh
 ./buds-spatial -opentrack 127.0.0.1:4242 \
   -opentrack-center -opentrack-map roll,-pitch,yaw > /dev/null
 ```
 
-`127.0.0.1` keeps packets on this Mac. Port `4242` must match MacOpentrack's
+`127.0.0.1` keeps packets on the local computer. Port `4242` must match MacOpentrack's
 input port. `> /dev/null` hides JSON output only; diagnostics remain visible and
 the terminal still accepts Enter. Do **not** use `< /dev/null` or background the
 process if you want interactive keyboard recentering.
@@ -175,8 +210,7 @@ Recommended order:
 3. Hold still. MacOpentrack's **Raw tracker data** yaw/pitch/roll should be near
    zero. Small sensor noise/drift is expected; translation remains zero.
 4. Clear MacOpentrack's previous offset with its **Center** action, or click
-   **Stop → Start** while still facing forward if **Center at startup** is enabled
-   (the default in our local setup).
+   **Stop → Start** while still facing forward if **Center at startup** is enabled.
 5. Wait briefly for the filter to settle. **Game data** rotations should now also
    be near zero. These values, not raw tracker data, are sent to X-Plane.
 
@@ -194,10 +228,10 @@ that MacOpentrack/X-Plane applied it. Verify the displayed values.
 
 ### 5. Enable X-Plane tracking
 
-The plugin on this Mac is installed at:
+Install the matching plugin under the X-Plane installation directory:
 
 ```text
-~/X-Plane 12/Resources/plugins/opentrack/mac_x64/opentrack.xpl
+<X-Plane installation>/Resources/plugins/opentrack/mac_x64/opentrack.xpl
 ```
 
 1. Keep the exporter and MacOpentrack tracking running.
@@ -210,7 +244,7 @@ The plugin on this Mac is installed at:
 No additional UDP port is needed between MacOpentrack and this plugin: they use
 local shared memory through opentrackclient. Use a matching app/plugin version,
 not an older Wine/X-Plane shared-memory plugin. If the menu is missing, inspect
-`~/X-Plane 12/Log.txt` for a plugin-loading error.
+`Log.txt` in the X-Plane installation directory for a plugin-loading error.
 
 ### Axis mapping and direction checks
 
@@ -300,7 +334,13 @@ endpoints, WSS, and LAN access.
   alone does not prove completion. Browser/API quaternions deliberately remain raw.
 - **Only rotation works:** expected. Positional leaning needs another sensor or
   tracking source; the Buds do not supply measured X/Y/Z position.
-
+- **WebSocket 403 Forbidden:** check the browser's `Origin` request header and
+  allow that exact scheme, host, and port with `-origins`. `localhost` and
+  `127.0.0.1` are different origins. Restart the backend after changing flags.
+- **WebSocket/API 401 Unauthorized:** if `BUDS_API_TOKEN` is configured, enter
+  the same token in the viewer. Leave the field empty when no token is configured.
+- **WebSocket connection refused:** keep the backend running and check its
+  terminal output. A Bluetooth timeout or failure stops the backend and its API.
 - **Not connected:** connect the Buds in macOS first. Discovery checks both
   IOBluetooth and `system_profiler`; names must contain `Buds2 Pro` or `SM-R510`,
   otherwise supply `-address`.
@@ -309,15 +349,14 @@ endpoints, WSS, and LAN access.
   does **not** grant direct Bluetooth access. Permission behavior for an unsigned
   command-line binary still needs validation; app packaging/signing may be needed.
   The spatial executable embeds Bluetooth usage descriptions in its Info.plist.
-- **RFCOMM busy or no quaternions:** close GalaxyBudsClient and disconnect
-  Galaxy Wearable/other competing clients, wear both buds, and retry. Exact
+- **RFCOMM busy or no quaternions:** fully quit Galaxy Buds Manager,
+  GalaxyBudsClient, and other competing clients, wear both buds, and retry. Exact
   conflict behavior and supported firmware versions remain unverified.
   Fully quit the app (closing its window may leave it running). If channel 27
   still fails, disconnect/reconnect the Buds in macOS to clear stale RFCOMM state.
-  Our first failure coincided with GalaxyBudsClient already holding that channel.
 - **No sensor data:** the command fails after 15 seconds without a quaternion
-  rather than pretending tracking works. Review terminal diagnostics and, if
-  needed, retain decoded JSON output. Raw-traffic capture is no longer available.
+  rather than pretending tracking works. Review terminal diagnostics, check that
+  both earbuds are worn, and clear competing connections before restarting.
 - **Embedding the transport:** lock the initial OS thread in `main`'s `init`
   and call `osx.Run`. The worker must close connections before returning;
   IOBluetooth operations depend on the main event loop remaining active.
@@ -327,3 +366,19 @@ Protocol sources and limitations: [docs/PROTOCOL.md](docs/PROTOCOL.md).
 The native implementation is `pkg/bluetooth/osx/native/buds_bluetooth_darwin.cc`,
 compiled as Objective-C++ with `-x objective-c++`. Keeping it as a directly
 recognized Go build input avoids stale cached objects after native source edits.
+
+## Acknowledgements
+
+A special shout-out to **[timschneeb](https://github.com/timschneeb)**, the
+developer of **[GalaxyBudsClient](https://github.com/timschneeb/GalaxyBudsClient)**,
+and its contributors. GalaxyBudsClient inspired the idea of using Galaxy Buds
+as a head tracker and provided an essential reference for building this project.
+
+Its macOS Bluetooth implementation helped establish how to interact with Apple's
+IOBluetooth framework, while its spatial-sensor implementation helped explain
+how to request, receive, and decode the earbuds' orientation data. This project
+builds on that open-source knowledge to export head orientation to browser
+viewers and flight simulators.
+
+The specific protocol and implementation references are documented in
+[docs/PROTOCOL.md](docs/PROTOCOL.md).
