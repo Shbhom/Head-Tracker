@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.shbhom.buds-head-tracker.spatial</string>
+    <key>CFBundleName</key>
+    <string>Buds Spatial Tracker</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Read head-orientation sensor data from your paired Galaxy Buds2 Pro.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>Read head-orientation sensor data from your paired Galaxy Buds2 Pro.</string>
+</dict>
+</plist>
